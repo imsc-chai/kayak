@@ -1,0 +1,16 @@
+{
+  "name": "kafka-utilities",
+  "version": "1.0.0",
+  "description": "Kafka client utilities for Kayak Travel Booking System",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["kafka", "messaging"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  }
+}
+
