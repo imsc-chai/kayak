@@ -17,7 +17,7 @@ const AdminCars = () => {
   const [filteredCars, setFilteredCars] = useState([]);
 
   useEffect(() => {
-    dispatch(fetchCars({ limit: 100 }));
+    dispatch(fetchCars({ limit: 10000 }));
   }, [dispatch]);
 
   useEffect(() => {
@@ -40,7 +40,7 @@ const AdminCars = () => {
     try {
       await carAPI.deleteCar(carId);
       toast.success('Car deleted successfully');
-      dispatch(fetchCars({ limit: 100 }));
+      dispatch(fetchCars({ limit: 10000 }));
     } catch (error) {
       toast.error('Failed to delete car');
     }

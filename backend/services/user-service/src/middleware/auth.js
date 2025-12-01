@@ -15,19 +15,29 @@ exports.authenticate = async (req, res, next) => {
 
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-      console.log('Token decoded - userId:', decoded.userId, 'adminId:', decoded.adminId);
+      // Only log token decode in debug mode (set DEBUG_AUTH=true in .env)
+      if (process.env.DEBUG_AUTH === 'true') {
+        console.log('Token decoded - userId:', decoded.userId, 'adminId:', decoded.adminId);
+      }
       // Accept both user tokens (with userId) and admin tokens (with adminId)
       if (decoded.userId) {
         req.userId = decoded.userId;
         req.isAdmin = false; // Explicitly set to false for user tokens
-        console.log('User token detected - req.userId:', req.userId, 'req.isAdmin:', req.isAdmin);
+        // Only log in debug mode
+        if (process.env.DEBUG_AUTH === 'true') {
+          console.log('User token detected - req.userId:', req.userId, 'req.isAdmin:', req.isAdmin);
+        }
       } else if (decoded.adminId) {
         // Admin token - allow admin operations
         req.userId = decoded.adminId; // Set userId for compatibility, but mark as admin
         req.isAdmin = true;
-        console.log('Admin token detected - req.isAdmin set to true, adminId:', decoded.adminId, 'req.userId:', req.userId);
+        // Only log in debug mode
+        if (process.env.DEBUG_AUTH === 'true') {
+          console.log('Admin token detected - req.isAdmin set to true, adminId:', decoded.adminId, 'req.userId:', req.userId);
+        }
       } else {
-        console.log('Invalid token format - no userId or adminId found');
+        // Always log errors
+        console.error('Invalid token format - no userId or adminId found');
         return res.status(401).json({
           success: false,
           message: 'Invalid token format'

@@ -17,7 +17,7 @@ const AdminFlights = () => {
   const [filteredFlights, setFilteredFlights] = useState([]);
 
   useEffect(() => {
-    dispatch(fetchFlights({ limit: 100 }));
+    dispatch(fetchFlights({ limit: 10000 }));
   }, [dispatch]);
 
   useEffect(() => {
@@ -40,7 +40,7 @@ const AdminFlights = () => {
     try {
       await flightAPI.deleteFlight(flightId);
       toast.success('Flight deleted successfully');
-      dispatch(fetchFlights({ limit: 100 }));
+      dispatch(fetchFlights({ limit: 10000 }));
     } catch (error) {
       toast.error('Failed to delete flight');
     }

@@ -1,4 +1,5 @@
 const Hotel = require('../models/Hotel');
+const { getCache, setCache, deleteCache, deleteCacheByPattern, recordCacheMiss, calculateSpeedup } = require('@kayak/shared/redis');
 
 exports.createHotel = async (req, res) => {
   try {
@@ -21,6 +22,9 @@ exports.createHotel = async (req, res) => {
     // Explicitly set maxGuests on the hotel object to ensure Mongoose saves it
     hotel.maxGuests = maxGuestsValue;
     await hotel.save();
+    
+    // Invalidate all hotel search caches
+    await deleteCacheByPattern('hotel:search:*');
     
     console.log('Created hotel maxGuests:', hotel.maxGuests);
     console.log('Created hotel full data:', JSON.stringify(hotel.toObject(), null, 2));
@@ -57,23 +61,95 @@ exports.getHotels = async (req, res) => {
     sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
     const skip = (page - 1) * limit;
 
+    const requestStartTime = Date.now();
+    
+    // Create cache key from query parameters
+    const cacheKey = `hotel:search:${JSON.stringify({ city, state, starRating, minPrice, maxPrice, sortBy, sortOrder, page, limit })}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Hotel search: ${city || state || 'all'} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        ...cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Hotel search: ${city || state || 'all'}`);
+
     const hotels = await Hotel.find(query).sort(sort).skip(skip).limit(Number(limit));
     const total = await Hotel.countDocuments(query);
 
-    res.json({ success: true, data: hotels, pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / limit) } });
+    const dbTime = Date.now() - dbStartTime;
+    
+    const result = { success: true, data: hotels, pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / limit) } };
+    
+    // Cache for 2 minutes (120 seconds)
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, result, 120);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+
+    res.json({
+      ...result,
+      cached: false
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching hotels', error: error.message });
   }
 };
 
 exports.getHotelById = async (req, res) => {
+  const requestStartTime = Date.now();
   try {
-    const hotel = await Hotel.findById(req.params.id);
+    const hotelId = req.params.id;
+    const cacheKey = `hotel:${hotelId}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Hotel ${hotelId} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        success: true,
+        data: cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Hotel ${hotelId} - fetching from DB`);
+    
+    const hotel = await Hotel.findById(hotelId);
     if (!hotel) return res.status(404).json({ success: false, message: 'Hotel not found' });
     
+    const dbTime = Date.now() - dbStartTime;
     console.log('Get hotel by ID - maxGuests:', hotel.maxGuests);
     
-    res.json({ success: true, data: hotel });
+    // Cache for 5 minutes (300 seconds)
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, hotel, 300);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+    
+    res.json({ success: true, data: hotel, cached: false });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching hotel', error: error.message });
   }
@@ -150,6 +226,10 @@ exports.updateHotel = async (req, res) => {
       console.log(`[Hotel Price Drop] Skipping notification - priceWasChanged: ${priceWasChanged}, oldPrice: ${oldPrice}, newPrice: ${newPrice}`);
     }
     
+    // Invalidate cache for this hotel and all search results
+    await deleteCache(`hotel:${req.params.id}`);
+    await deleteCacheByPattern('hotel:search:*');
+    
     res.json({ success: true, message: 'Hotel updated successfully', data: hotel });
   } catch (error) {
     console.error('Error updating hotel:', error);
@@ -159,8 +239,14 @@ exports.updateHotel = async (req, res) => {
 
 exports.deleteHotel = async (req, res) => {
   try {
-    const hotel = await Hotel.findByIdAndDelete(req.params.id);
+    const hotelId = req.params.id;
+    const hotel = await Hotel.findByIdAndDelete(hotelId);
     if (!hotel) return res.status(404).json({ success: false, message: 'Hotel not found' });
+    
+    // Invalidate cache for this hotel and all search results
+    await deleteCache(`hotel:${hotelId}`);
+    await deleteCacheByPattern('hotel:search:*');
+    
     res.json({ success: true, message: 'Hotel deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error deleting hotel', error: error.message });

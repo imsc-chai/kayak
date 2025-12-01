@@ -1,4 +1,5 @@
 const { createBookingConsumer, EVENT_TYPES } = require('../../../../../kafka/consumers/bookingConsumer');
+const { deleteCacheByPattern } = require('@kayak/shared/redis');
 
 let consumerInstance = null;
 
@@ -22,7 +23,10 @@ async function startBookingConsumer() {
           type: eventData.type,
           totalAmountPaid: eventData.totalAmountPaid
         });
-        // TODO: In a future iteration, update admin analytics collections here
+        
+        // Invalidate analytics cache since new booking affects analytics
+        await deleteCacheByPattern('admin:analytics:*');
+        console.log('✅ [Admin Service] Invalidated analytics cache after booking.created');
       } catch (error) {
         console.error('[Admin Service] Error handling booking.created event:', error);
       }
@@ -35,7 +39,10 @@ async function startBookingConsumer() {
           type: eventData.type,
           refundAmount: eventData.refundDetails?.refundAmount
         });
-        // TODO: In a future iteration, update admin analytics collections here
+        
+        // Invalidate analytics cache since cancellation affects analytics
+        await deleteCacheByPattern('admin:analytics:*');
+        console.log('✅ [Admin Service] Invalidated analytics cache after booking.cancelled');
       } catch (error) {
         console.error('[Admin Service] Error handling booking.cancelled event:', error);
       }

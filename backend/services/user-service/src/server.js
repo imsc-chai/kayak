@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const { connectRedis, disconnectRedis } = require('@kayak/shared/redis');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -63,6 +64,9 @@ app.listen(PORT, async () => {
   console.log(`📝 Health check: http://localhost:${PORT}/health`);
   console.log(`🔗 API endpoint: http://localhost:${PORT}/api/users`);
   
+  // Connect to Redis
+  await connectRedis();
+  
   // Start Kafka consumer
   try {
     await startBookingConsumer();
@@ -76,12 +80,14 @@ app.listen(PORT, async () => {
 process.on('SIGINT', async () => {
   console.log('Shutting down User Service...');
   await stopBookingConsumer();
+  await disconnectRedis();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('Shutting down User Service...');
   await stopBookingConsumer();
+  await disconnectRedis();
   process.exit(0);
 });
 

@@ -1,9 +1,14 @@
 const Car = require('../models/Car');
+const { getCache, setCache, deleteCache, deleteCacheByPattern, recordCacheMiss, calculateSpeedup } = require('@kayak/shared/redis');
 
 exports.createCar = async (req, res) => {
   try {
     const car = new Car(req.body);
     await car.save();
+    
+    // Invalidate all car search caches
+    await deleteCacheByPattern('car:search:*');
+    
     res.status(201).json({ success: true, message: 'Car created successfully', data: car });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error creating car', error: error.message });
@@ -106,17 +111,92 @@ exports.getCars = async (req, res) => {
 
     const total = await Car.countDocuments(query);
 
-    res.json({ success: true, data: cars, pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / limit) } });
+    const requestStartTime = Date.now();
+    
+    // Create cache key from query parameters
+    const cacheKey = `car:search:${JSON.stringify({ carType, city, minPrice, maxPrice, pickupDate, returnDate, sortBy, sortOrder, page, limit })}`;
+    
+    // Try to get from cache first (but note: date-based filtering happens after DB query, so cache may not be perfect)
+    // For now, we'll cache the filtered results
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Car search: ${city || carType || 'all'} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        ...cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Car search: ${city || carType || 'all'}`);
+
+    const dbTime = Date.now() - dbStartTime;
+    
+    const result = { success: true, data: cars, pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / limit) } };
+    
+    // Cache for 2 minutes (120 seconds) - car availability changes frequently
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, result, 120);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+
+    res.json({
+      ...result,
+      cached: false
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching cars', error: error.message });
   }
 };
 
 exports.getCarById = async (req, res) => {
+  const requestStartTime = Date.now();
   try {
-    const car = await Car.findById(req.params.id);
+    const carId = req.params.id;
+    const cacheKey = `car:${carId}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Car ${carId} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        success: true,
+        data: cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Car ${carId} - fetching from DB`);
+    
+    const car = await Car.findById(carId);
     if (!car) return res.status(404).json({ success: false, message: 'Car not found' });
-    res.json({ success: true, data: car });
+    
+    const dbTime = Date.now() - dbStartTime;
+    
+    // Cache for 5 minutes (300 seconds)
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, car, 300);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+    
+    res.json({ success: true, data: car, cached: false });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching car', error: error.message });
   }
@@ -147,6 +227,10 @@ exports.updateCar = async (req, res) => {
       await notifyPriceDrop(car._id.toString(), oldPrice, newPrice, carObj);
     }
     
+    // Invalidate cache for this car and all search results
+    await deleteCache(`car:${req.params.id}`);
+    await deleteCacheByPattern('car:search:*');
+    
     res.json({ success: true, message: 'Car updated successfully', data: car });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error updating car', error: error.message });
@@ -155,8 +239,14 @@ exports.updateCar = async (req, res) => {
 
 exports.deleteCar = async (req, res) => {
   try {
-    const car = await Car.findByIdAndDelete(req.params.id);
+    const carId = req.params.id;
+    const car = await Car.findByIdAndDelete(carId);
     if (!car) return res.status(404).json({ success: false, message: 'Car not found' });
+    
+    // Invalidate cache for this car and all search results
+    await deleteCache(`car:${carId}`);
+    await deleteCacheByPattern('car:search:*');
+    
     res.json({ success: true, message: 'Car deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error deleting car', error: error.message });

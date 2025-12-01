@@ -1,6 +1,64 @@
 const Billing = require('../models/Billing');
 const { generateBillingId } = require('../utils/idGenerator');
 
+/**
+ * Extract only essential booking details for Kafka events
+ * Removes unnecessary data like full seat maps, internal IDs, etc.
+ */
+function extractEssentialBookingDetails(bookingDetails, bookingType) {
+  if (!bookingDetails) return null;
+
+  const essential = {};
+
+  if (bookingType === 'flight') {
+    essential.flightId = bookingDetails.flightId;
+    essential.airline = bookingDetails.airline;
+    essential.departureAirport = bookingDetails.departureAirport ? {
+      code: bookingDetails.departureAirport.code,
+      city: bookingDetails.departureAirport.city
+    } : null;
+    essential.arrivalAirport = bookingDetails.arrivalAirport ? {
+      code: bookingDetails.arrivalAirport.code,
+      city: bookingDetails.arrivalAirport.city
+    } : null;
+    essential.departureDateTime = bookingDetails.departureDateTime;
+    essential.arrivalDateTime = bookingDetails.arrivalDateTime;
+    essential.flightClass = bookingDetails.flightClass;
+    essential.ticketPrice = bookingDetails.ticketPrice;
+    essential.passengers = bookingDetails.passengers;
+    essential.tripType = bookingDetails.tripType;
+    // Include return flight info if round trip
+    if (bookingDetails.returnFlightId) {
+      essential.returnFlightId = bookingDetails.returnFlightId;
+      essential.returnDepartureDateTime = bookingDetails.returnDepartureDateTime;
+      essential.returnArrivalDateTime = bookingDetails.returnArrivalDateTime;
+    }
+  } else if (bookingType === 'hotel') {
+    essential.hotelId = bookingDetails.hotelId;
+    essential.hotelName = bookingDetails.hotelName;
+    essential.city = bookingDetails.city;
+    essential.state = bookingDetails.state;
+    essential.checkIn = bookingDetails.checkIn;
+    essential.checkOut = bookingDetails.checkOut;
+    essential.guests = bookingDetails.guests;
+    essential.pricePerNight = bookingDetails.pricePerNight;
+    essential.starRating = bookingDetails.starRating;
+  } else if (bookingType === 'car') {
+    essential.company = bookingDetails.company;
+    essential.model = bookingDetails.model;
+    essential.carType = bookingDetails.carType;
+    essential.location = bookingDetails.location ? {
+      city: bookingDetails.location.city,
+      state: bookingDetails.location.state
+    } : null;
+    essential.pickupDate = bookingDetails.pickupDate;
+    essential.returnDate = bookingDetails.returnDate;
+    essential.dailyRentalPrice = bookingDetails.dailyRentalPrice;
+  }
+
+  return essential;
+}
+
 exports.createBilling = async (req, res) => {
   try {
     // Validate required fields
@@ -112,7 +170,7 @@ exports.createBilling = async (req, res) => {
         data: {
           invoiceNumber: billing.invoiceDetails?.invoiceNumber,
           receiptNumber: billing.receiptDetails?.receiptNumber,
-          bookingDetails: bookingDetails || null
+          bookingDetails: extractEssentialBookingDetails(bookingDetails, billing.bookingType)
         }
       });
       kafkaSuccess = true;

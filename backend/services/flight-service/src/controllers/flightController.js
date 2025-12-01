@@ -1,5 +1,6 @@
 const Flight = require('../models/Flight');
 const mongoose = require('mongoose');
+const { getCache, setCache, deleteCache, deleteCacheByPattern, recordCacheMiss, calculateSpeedup } = require('@kayak/shared/redis');
 
 // Reservation expiration time in milliseconds (15 minutes)
 const RESERVATION_EXPIRY_TIME = 15 * 60 * 1000; // 15 minutes
@@ -276,6 +277,9 @@ exports.createFlight = async (req, res) => {
     await flight.save();
     console.log('✅ Flight saved to database');
     
+    // Invalidate all flight search caches (new flight added)
+    await deleteCacheByPattern('flight:search:*');
+    
     // Debug: Log saved flight
     console.log('Flight created successfully. Return flight fields:', {
       returnFlightId: flight.returnFlightId,
@@ -418,6 +422,27 @@ exports.getFlights = async (req, res) => {
     // Pagination
     const skip = (page - 1) * limit;
 
+    const requestStartTime = Date.now();
+    
+    // Create cache key from query parameters
+    const cacheKey = `flight:search:${JSON.stringify({ from, to, departureDate, returnDate, flightClass, minPrice, maxPrice, sortBy, sortOrder, page, limit })}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Flight search: ${from || 'all'} → ${to || 'all'} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        ...cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Flight search: ${from || 'all'} → ${to || 'all'}`);
+
     const flights = await Flight.find(query)
       .sort(sort)
       .skip(skip)
@@ -425,7 +450,9 @@ exports.getFlights = async (req, res) => {
 
     const total = await Flight.countDocuments(query);
 
-    res.json({
+    const dbTime = Date.now() - dbStartTime;
+    
+    const result = {
       success: true,
       data: flights,
       pagination: {
@@ -434,6 +461,22 @@ exports.getFlights = async (req, res) => {
         total,
         pages: Math.ceil(total / limit)
       }
+    };
+
+    // Cache for 2 minutes (120 seconds) - search results change frequently
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, result, 120);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+
+    res.json({
+      ...result,
+      cached: false
     });
   } catch (error) {
     res.status(500).json({
@@ -446,8 +489,29 @@ exports.getFlights = async (req, res) => {
 
 // Get flight by ID
 exports.getFlightById = async (req, res) => {
+  const requestStartTime = Date.now();
   try {
-    const flight = await Flight.findById(req.params.id);
+    const flightId = req.params.id;
+    const cacheKey = `flight:${flightId}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Flight ${flightId} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        success: true,
+        data: cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Flight ${flightId} - fetching from DB`);
+    
+    const flight = await Flight.findById(flightId);
     if (!flight) {
       return res.status(404).json({
         success: false,
@@ -455,9 +519,23 @@ exports.getFlightById = async (req, res) => {
       });
     }
 
+    const dbTime = Date.now() - dbStartTime;
+    
+    // Cache for 5 minutes (300 seconds)
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, flight, 300);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+
     res.json({
       success: true,
-      data: flight
+      data: flight,
+      cached: false
     });
   } catch (error) {
     res.status(500).json({
@@ -659,6 +737,10 @@ exports.updateFlight = async (req, res) => {
       await notifyPriceDrop(flight.returnFlightId, oldReturnPrice, newReturnPrice, returnFlightObj);
     }
 
+    // Invalidate cache for this flight and all search results
+    await deleteCache(`flight:${req.params.id}`);
+    await deleteCacheByPattern('flight:search:*');
+
     res.json({
       success: true,
       message: 'Flight updated successfully',
@@ -683,13 +765,18 @@ exports.updateFlight = async (req, res) => {
 // Delete flight
 exports.deleteFlight = async (req, res) => {
   try {
-    const flight = await Flight.findByIdAndDelete(req.params.id);
+    const flightId = req.params.id;
+    const flight = await Flight.findByIdAndDelete(flightId);
     if (!flight) {
       return res.status(404).json({
         success: false,
         message: 'Flight not found'
       });
     }
+
+    // Invalidate cache for this flight and all search results
+    await deleteCache(`flight:${flightId}`);
+    await deleteCacheByPattern('flight:search:*');
 
     res.json({
       success: true,

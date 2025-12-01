@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const { connectRedis, disconnectRedis } = require('@kayak/shared/redis');
 
 const app = express();
 const PORT = process.env.PORT || 5004;
@@ -39,6 +40,9 @@ app.listen(PORT, async () => {
   console.log(`📝 Health check: http://localhost:${PORT}/health`);
   console.log(`🔗 API endpoint: http://localhost:${PORT}/api/cars`);
 
+  // Connect to Redis
+  await connectRedis();
+
   try {
     await startBookingConsumer();
   } catch (error) {
@@ -49,12 +53,14 @@ app.listen(PORT, async () => {
 process.on('SIGINT', async () => {
   console.log('[Car Service] Shutting down...');
   await stopBookingConsumer();
+  await disconnectRedis();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('[Car Service] Shutting down...');
   await stopBookingConsumer();
+  await disconnectRedis();
   process.exit(0);
 });
 

@@ -14,6 +14,18 @@ if (-not $dockerRunning) {
     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
 
+# Start Redis (if not already running)
+Write-Host "Starting Redis..." -ForegroundColor Green
+$redisRunning = docker ps --filter "name=kayak-redis" --format "{{.Names}}" 2>$null
+if (-not $redisRunning) {
+    Set-Location docker
+    Start-Process powershell -ArgumentList "-NoExit", "-Command", "Write-Host '=== REDIS (Port 6379) ===' -ForegroundColor Cyan; docker-compose up redis"
+    Set-Location ..
+    Start-Sleep -Seconds 2
+} else {
+    Write-Host "✅ Redis is already running" -ForegroundColor Green
+}
+
 # Start Kafka
 Write-Host "Starting Kafka and Zookeeper..." -ForegroundColor Green
 Set-Location kafka
@@ -41,6 +53,11 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PWD\backend\
 Start-Sleep -Seconds 1
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PWD\backend\services\billing-service'; Write-Host '=== BILLING SERVICE (Port 5005) ===' -ForegroundColor Green; npm start"
+Start-Sleep -Seconds 1
+
+# Start API Gateway
+Write-Host "Starting API Gateway..." -ForegroundColor Green
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PWD\backend\api-gateway'; Write-Host '=== API GATEWAY (Port 5000) ===' -ForegroundColor Green; npm start"
 Start-Sleep -Seconds 2
 
 # Start Frontend
@@ -51,6 +68,7 @@ Write-Host ""
 Write-Host "=== ALL SERVICES STARTED ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "Services running:" -ForegroundColor Cyan
+Write-Host "  - API Gateway: http://localhost:5000" -ForegroundColor White
 Write-Host "  - Kafka & Zookeeper (Docker)" -ForegroundColor White
 Write-Host "  - Admin Service: http://localhost:5006" -ForegroundColor White
 Write-Host "  - User Service: http://localhost:5001" -ForegroundColor White

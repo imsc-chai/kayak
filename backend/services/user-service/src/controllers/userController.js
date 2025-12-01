@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
+const { getCache, setCache, deleteCache, deleteCacheByPattern, recordCacheMiss, calculateSpeedup } = require('@kayak/shared/redis');
 
 // Import validation helpers from User model
 const { SSN_REGEX, ZIP_REGEX, isValidUSState, VALID_STATE_ABBREVIATIONS } = require('../models/User');
@@ -265,8 +266,30 @@ exports.login = async (req, res) => {
 
 // Get user by ID
 exports.getUserById = async (req, res) => {
+  const requestStartTime = Date.now();
   try {
-    const user = await User.findById(req.params.id);
+    const userId = req.params.id;
+    const cacheKey = `user:${userId}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] User ${userId} | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        success: true,
+        data: cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] User ${userId} - fetching from DB`);
+    
+    // Fetch from database
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -294,13 +317,34 @@ exports.getUserById = async (req, res) => {
       };
     }
 
-    console.log('Returning user data:', JSON.stringify(userData, null, 2));
-    console.log('Emergency Contact:', userData.emergencyContact);
-    console.log('Travel Preferences:', userData.travelPreferences);
+    const dbTime = Date.now() - dbStartTime;
+    
+    // Cache for 5 minutes (300 seconds)
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, userData, 300);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+
+    // Only log essential info (not full user data with seat maps)
+    if (process.env.DEBUG_USER === 'true') {
+      console.log('Returning user data:', JSON.stringify(userData, null, 2));
+      console.log('Emergency Contact:', userData.emergencyContact);
+      console.log('Travel Preferences:', userData.travelPreferences);
+    } else {
+      // Log only summary
+      console.log(`✅ Returning user data for: ${userData.email} (${userData._id})`);
+      console.log(`   Bookings: ${userData.bookingHistory?.length || 0}, Favourites: ${userData.favourites?.length || 0}`);
+    }
 
     res.json({
       success: true,
-      data: userData
+      data: userData,
+      cached: false
     });
   } catch (error) {
     console.error('Error fetching user:', error);
@@ -417,23 +461,32 @@ exports.updateUser = async (req, res) => {
     // Allow admins to update any user profile
     // If user is not an admin, they can only update their own profile
     const isAdmin = req.isAdmin === true;
-    console.log('Update user - req.isAdmin:', req.isAdmin, 'isAdmin (boolean):', isAdmin);
-    console.log('Update user - req.userId:', req.userId);
-    console.log('Update user - target id:', id);
-    console.log('Update user - Authorization header:', req.headers.authorization ? 'Present' : 'Missing');
+    
+    if (process.env.DEBUG_USER === 'true') {
+      console.log('Update user - req.isAdmin:', req.isAdmin, 'isAdmin (boolean):', isAdmin);
+      console.log('Update user - req.userId:', req.userId);
+      console.log('Update user - target id:', id);
+      console.log('Update user - Authorization header:', req.headers.authorization ? 'Present' : 'Missing');
+    }
     
     // If user is admin, allow update regardless of userId match
     if (isAdmin) {
-      console.log('✅ Allowing update - user is admin');
+      if (process.env.DEBUG_USER === 'true') {
+        console.log('✅ Allowing update - user is admin');
+      }
     } else if (req.userId && req.userId !== id) {
       // If not admin and trying to update different user, block
-      console.log('❌ Blocking update - user is not admin and trying to update different user');
+      if (process.env.DEBUG_USER === 'true') {
+        console.log('❌ Blocking update - user is not admin and trying to update different user');
+      }
       return res.status(403).json({
         success: false,
         message: 'You can only update your own profile'
       });
     } else {
-      console.log('✅ Allowing update - user is updating their own profile');
+      if (process.env.DEBUG_USER === 'true') {
+        console.log('✅ Allowing update - user is updating their own profile');
+      }
     }
 
     // Handle nested objects - MongoDB can handle nested objects directly with $set
@@ -495,8 +548,10 @@ exports.updateUser = async (req, res) => {
       };
     }
 
-    console.log('Update query:', JSON.stringify(updateQuery, null, 2));
-    console.log('Original updateData:', JSON.stringify(updateData, null, 2));
+    if (process.env.DEBUG_USER === 'true') {
+      console.log('Update query:', JSON.stringify(updateQuery, null, 2));
+      console.log('Original updateData:', JSON.stringify(updateData, null, 2));
+    }
 
     // Use runValidators: false for now to avoid enum validation issues with empty strings
     // We'll validate manually if needed
@@ -533,9 +588,17 @@ exports.updateUser = async (req, res) => {
       };
     }
     
-    console.log('Updated user from DB:', JSON.stringify(updatedUser, null, 2));
-    console.log('Updated user emergencyContact:', updatedUser.emergencyContact);
-    console.log('Updated user travelPreferences:', updatedUser.travelPreferences);
+    // Only log essential info (not full user data)
+    if (process.env.DEBUG_USER === 'true') {
+      console.log('Updated user from DB:', JSON.stringify(updatedUser, null, 2));
+      console.log('Updated user emergencyContact:', updatedUser.emergencyContact);
+      console.log('Updated user travelPreferences:', updatedUser.travelPreferences);
+    } else {
+      console.log(`✅ User updated: ${updatedUser.email} (${updatedUser._id})`);
+    }
+
+    // Invalidate cache
+    await deleteCache(`user:${id}`);
 
     res.json({
       success: true,
@@ -588,13 +651,17 @@ exports.updateUser = async (req, res) => {
 // Delete user
 exports.deleteUser = async (req, res) => {
   try {
-    const user = await User.findByIdAndDelete(req.params.id);
+    const userId = req.params.id;
+    const user = await User.findByIdAndDelete(userId);
     if (!user) {
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
+
+    // Invalidate cache
+    await deleteCache(`user:${userId}`);
 
     res.json({
       success: true,
@@ -627,6 +694,9 @@ exports.addBooking = async (req, res) => {
         message: 'User not found'
       });
     }
+
+    // Invalidate cache
+    await deleteCache(`user:${userId}`);
 
     res.json({
       success: true,
@@ -895,6 +965,9 @@ exports.addFavourite = async (req, res) => {
 
     await user.save();
 
+    // Invalidate cache
+    await deleteCache(`user:${userId}`);
+
     res.json({
       success: true,
       message: 'Added to favourites successfully',
@@ -937,6 +1010,9 @@ exports.removeFavourite = async (req, res) => {
     );
 
     await user.save();
+
+    // Invalidate cache
+    await deleteCache(`user:${userId}`);
 
     res.json({
       success: true,
@@ -1276,9 +1352,11 @@ exports.createNotification = async (req, res) => {
 
     if (duplicateNotification) {
       // Duplicate found, return existing notification instead of creating a new one
-      console.log(`[Duplicate Prevention] Duplicate notification prevented for user ${userId}: ${title}`);
-      console.log(`[Duplicate Prevention] Existing message: "${duplicateNotification.message.substring(0, 50)}..."`);
-      console.log(`[Duplicate Prevention] New message: "${message.substring(0, 50)}..."`);
+      if (process.env.DEBUG_USER === 'true') {
+        console.log(`[Duplicate Prevention] Duplicate notification prevented for user ${userId}: ${title}`);
+        console.log(`[Duplicate Prevention] Existing message: "${duplicateNotification.message.substring(0, 50)}..."`);
+        console.log(`[Duplicate Prevention] New message: "${message.substring(0, 50)}..."`);
+      }
       return res.json({
         success: true,
         message: 'Notification already exists',

@@ -3,6 +3,7 @@ const AnalyticsClick = require('../models/AnalyticsClick');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const { getCache, setCache, deleteCache, deleteCacheByPattern, recordCacheMiss, calculateSpeedup } = require('@kayak/shared/redis');
 
 const generateToken = (adminId) => {
   return jwt.sign({ adminId }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '7d' });
@@ -27,6 +28,28 @@ exports.login = async (req, res) => {
 exports.getAnalytics = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
+    
+    const requestStartTime = Date.now();
+    
+    // Create cache key from query parameters
+    const cacheKey = `admin:analytics:${JSON.stringify({ startDate, endDate })}`;
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Analytics (${startDate || 'all'} - ${endDate || 'all'}) | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        success: true,
+        data: cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const servicesStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Analytics (${startDate || 'all'} - ${endDate || 'all'}) - fetching from services`);
     
     // Fetch data from all services in parallel
     const [usersRes, flightsRes, hotelsRes, carsRes, revenueRes] = await Promise.allSettled([
@@ -581,7 +604,24 @@ exports.getAnalytics = async (req, res) => {
       bookingStatusDistribution
     };
 
-    res.json({ success: true, data: analytics });
+    const servicesTime = Date.now() - servicesStartTime;
+    
+    // Cache for 5 minutes (300 seconds) - analytics data changes frequently but expensive to compute
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, analytics, 300);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   Services: ${servicesTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+
+    res.json({
+      success: true,
+      data: analytics,
+      cached: false
+    });
   } catch (error) {
     console.error('Analytics error:', error);
     res.status(500).json({ success: false, message: 'Error fetching analytics', error: error.message });
@@ -592,6 +632,10 @@ exports.createAdmin = async (req, res) => {
   try {
     const admin = new Admin(req.body);
     await admin.save();
+    
+    // Invalidate admin list cache
+    await deleteCache('admin:list');
+    
     res.status(201).json({ success: true, message: 'Admin created successfully', data: admin.toJSON() });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error creating admin', error: error.message });
@@ -599,9 +643,47 @@ exports.createAdmin = async (req, res) => {
 };
 
 exports.getAdmins = async (req, res) => {
+  const requestStartTime = Date.now();
   try {
+    const cacheKey = 'admin:list';
+    
+    // Try to get from cache first
+    const cacheResult = await getCache(cacheKey);
+    if (cacheResult && cacheResult.value) {
+      const totalTime = Date.now() - requestStartTime;
+      const speedup = calculateSpeedup(cacheKey, totalTime);
+      const speedupText = speedup ? ` | ${speedup}` : '';
+      console.log(`✅ [Cache HIT] Admin list | Redis: ${cacheResult.time}ms | Total: ${totalTime}ms${speedupText}`);
+      return res.json({
+        success: true,
+        data: cacheResult.value,
+        cached: true
+      });
+    }
+    
+    const dbStartTime = Date.now();
+    console.log(`❌ [Cache MISS] Admin list - fetching from DB`);
+    
     const admins = await Admin.find().select('-password');
-    res.json({ success: true, data: admins });
+    
+    const dbTime = Date.now() - dbStartTime;
+    
+    // Cache for 5 minutes (300 seconds)
+    const cacheStartTime = Date.now();
+    await setCache(cacheKey, admins, 300);
+    const cacheTime = Date.now() - cacheStartTime;
+    
+    const totalTime = Date.now() - requestStartTime;
+    console.log(`   DB: ${dbTime}ms | Cache Write: ${cacheTime}ms | Total: ${totalTime}ms`);
+    
+    // Record cache miss for performance tracking
+    recordCacheMiss(cacheKey, totalTime);
+    
+    res.json({
+      success: true,
+      data: admins,
+      cached: false
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching admins', error: error.message });
   }
@@ -612,6 +694,9 @@ exports.updateAdmin = async (req, res) => {
     delete req.body.password;
     const admin = await Admin.findByIdAndUpdate(req.params.id, { $set: req.body }, { new: true, runValidators: true });
     if (!admin) return res.status(404).json({ success: false, message: 'Admin not found' });
+    // Invalidate admin list cache
+    await deleteCache('admin:list');
+    
     res.json({ success: true, message: 'Admin updated successfully', data: admin.toJSON() });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error updating admin', error: error.message });
@@ -622,6 +707,9 @@ exports.deleteAdmin = async (req, res) => {
   try {
     const admin = await Admin.findByIdAndDelete(req.params.id);
     if (!admin) return res.status(404).json({ success: false, message: 'Admin not found' });
+    // Invalidate admin list cache
+    await deleteCache('admin:list');
+    
     res.json({ success: true, message: 'Admin deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error deleting admin', error: error.message });

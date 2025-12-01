@@ -17,7 +17,7 @@ const AdminHotels = () => {
   const [filteredHotels, setFilteredHotels] = useState([]);
 
   useEffect(() => {
-    dispatch(fetchHotels({ limit: 100 }));
+    dispatch(fetchHotels({ limit: 10000 }));
   }, [dispatch]);
 
   useEffect(() => {
@@ -39,7 +39,7 @@ const AdminHotels = () => {
     try {
       await hotelAPI.deleteHotel(hotelId);
       toast.success('Hotel deleted successfully');
-      dispatch(fetchHotels({ limit: 100 }));
+      dispatch(fetchHotels({ limit: 10000 }));
     } catch (error) {
       toast.error('Failed to delete hotel');
     }
